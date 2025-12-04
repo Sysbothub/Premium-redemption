@@ -443,6 +443,7 @@ class PremiumRedeemer(commands.Cog):
             return
 
         # Permissions needed (Combined Integer: 268820352):
+        # Read Messages, Send Messages, Manage Roles
         PERMISSIONS_INT = 268820352 
 
         # Construct the OAuth2 URL
