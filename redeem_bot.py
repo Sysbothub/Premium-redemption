@@ -10,7 +10,8 @@ from datetime import datetime, timedelta
 import discord
 from discord.ext import commands, tasks
 from pymongo import MongoClient
-from pymongo.errors import ConnectionError as MongoConnectionError
+# CORRECTED: Use ConnectionFailure for compatibility with recent pymongo versions
+from pymongo.errors import ConnectionFailure as MongoConnectionError
 
 # Web Server Library (for Render health check)
 from flask import Flask, jsonify
