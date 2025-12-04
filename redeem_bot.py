@@ -2,12 +2,12 @@ import os
 import random
 import string
 import threading
-import time # Added for the main loop sleep
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 
 # Discord and MongoDB Libraries
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from pymongo import MongoClient
 
 # Web Server Library (for Render health check)
@@ -24,10 +24,14 @@ DB_NAME = "DiscordBotDB"
 PREFIX = "$"
 PORT = int(os.environ.get("PORT", 3000))
 
+# Dedicated channel ID for logging redemption, configuration, and expiry events
+# NOTE: Replace this with your actual log channel ID.
+LOG_CHANNEL_ID = 1445931744816660572
+
 # --- Database Setup (Shared across all bot instances) ---
 try:
     client_mongo = MongoClient(MONGO_URI)
-    db = client_mongo[DB_URI]
+    db = client_mongo[DB_NAME]
     codes_collection = db["redemption_codes"]
     config_collection = db["guild_configs"]
     print("Successfully connected to MongoDB.")
@@ -41,7 +45,17 @@ async def get_guild_config(guild_id: int):
     """Retrieves guild configuration from the database."""
     if not db: return {}
     config = config_collection.find_one({"_id": guild_id})
-    return config if config else {"_id": guild_id, "vip_role_id": None, "redeeming_admin_id": None}
+    # Ensure all required fields exist or are None/default
+    if config:
+        return config
+    return {
+        "_id": guild_id, 
+        "vip_role_id": None, 
+        "redeeming_admin_id": None, 
+        "subscription_end_date": None,
+        "expiry_notified_1d": False, # Flag for 1-day warning
+        "expiry_notified_final": False # Flag for final expiration
+    }
 
 async def update_guild_config(guild_id: int, key: str, value):
     """Updates a specific key in the guild configuration."""
@@ -66,7 +80,7 @@ def generate_unique_code_sync(prefix: str, duration_days: int):
     codes_collection.insert_one({
         "code": full_code,
         "prefix": prefix,
-        "duration_days": duration_days, # NEW: Duration in days
+        "duration_days": duration_days, 
         "redeemed": False,
         "redeemed_by_user_id": None,
         "redeemed_at_guild_id": None,
@@ -79,12 +93,138 @@ def generate_unique_code_sync(prefix: str, duration_days: int):
 class PremiumRedeemer(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # Start the background task when the Cog is initialized
+        self.check_expirations.start() 
+
+    def cog_unload(self):
+        """Ensure the background task is cancelled when the Cog is unloaded."""
+        self.check_expirations.cancel()
+
+    async def send_log_embed(self, title: str, description: str, color: discord.Color, fields: list = None):
+        """Helper function to send a structured log message to the dedicated channel."""
+        if not LOG_CHANNEL_ID:
+            print("LOG_CHANNEL_ID is not configured. Skipping log.")
+            return
+
+        try:
+            # Use get_channel (cached) and fall back to fetch_channel if not found
+            log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
+            if not log_channel:
+                log_channel = await self.bot.fetch_channel(LOG_CHANNEL_ID)
+            
+            if not log_channel:
+                print(f"Error: Log channel with ID {LOG_CHANNEL_ID} not found.")
+                return
+
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=color,
+                timestamp=datetime.utcnow()
+            )
+            
+            if fields:
+                for name, value, inline in fields:
+                    embed.add_field(name=name, value=value, inline=inline)
+            
+            embed.set_footer(text=f"Bot Instance: {self.bot.user.name}")
+            
+            await log_channel.send(embed=embed)
+
+        except Exception as e:
+            print(f"Error sending log message to Discord: {e}")
 
     @commands.Cog.listener()
     async def on_ready(self):
         """Confirms bot readiness."""
         print(f"Bot instance logged in as {self.bot.user.name} (ID: {self.bot.user.id})")
         await self.bot.change_presence(activity=discord.Game(name=f"{PREFIX}redeem"))
+
+    @tasks.loop(hours=6) # Check every 6 hours
+    async def check_expirations(self):
+        """Background task to check for expiring and expired subscriptions."""
+        if not db or not self.bot.is_ready():
+            return
+
+        utcnow = datetime.utcnow()
+        one_day_ahead = utcnow + timedelta(days=1)
+
+        # Query for all configured guilds that have an expiration date set
+        subscriptions = config_collection.find({
+            "subscription_end_date": {"$ne": None},
+        })
+
+        for sub in subscriptions:
+            guild_id = sub["_id"]
+            vip_role_id = sub.get("vip_role_id")
+            expiry_date = sub["subscription_end_date"]
+            redeeming_admin_id = sub.get("redeeming_admin_id")
+            guild = self.bot.get_guild(guild_id)
+
+            # 1. FINAL EXPIRY (Subscription has passed)
+            if expiry_date < utcnow and not sub.get("expiry_notified_final"):
+                
+                role_removed = "N/A (Role not set or admin ID missing)"
+                
+                if guild and vip_role_id and redeeming_admin_id:
+                    member = guild.get_member(redeeming_admin_id)
+                    role = guild.get_role(vip_role_id)
+                    
+                    if member and role:
+                        try:
+                            # Attempt to remove the role
+                            await member.remove_roles(role, reason="Premium Subscription Expired")
+                            role_removed = "✅ Role Removed"
+                        except discord.Forbidden:
+                            role_removed = "❌ Forbidden (Missing 'Manage Roles' permission)"
+                        except Exception as e:
+                            role_removed = f"❌ Error: {e}"
+                    elif not member:
+                        role_removed = "⚠️ Redeeming Admin not found in guild"
+                    elif not role:
+                        role_removed = "⚠️ VIP Role not found in guild"
+
+                # Send FINAL EXPIRATION Log
+                await self.send_log_embed(
+                    title="🔴 SUBSCRIPTION EXPIRED",
+                    description=f"Subscription for server **{guild.name if guild else f'ID: {guild_id}'}** has expired and role removal was attempted.",
+                    color=discord.Color.red(),
+                    fields=[
+                        ("Server Name/ID", f"{guild.name if guild else 'N/A'} (`{guild_id}`)", False),
+                        ("Redeeming Admin ID", f"`{redeeming_admin_id}`", True),
+                        ("Expired On (UTC)", expiry_date.strftime("%Y-%m-%d %H:%M UTC"), True),
+                        ("Role ID", f"`{vip_role_id}`", True),
+                        ("Role Action", role_removed, True),
+                    ]
+                )
+                
+                # Set flag to prevent future final notifications
+                await update_guild_config(guild_id, "expiry_notified_final", True)
+
+
+            # 2. 1-DAY WARNING (Subscription expires within the next 24 hours)
+            elif expiry_date < one_day_ahead and expiry_date >= utcnow and not sub.get("expiry_notified_1d"):
+                
+                # Send 1-DAY WARNING Log
+                await self.send_log_embed(
+                    title="🟠 SUBSCRIPTION EXPIRING SOON (24H)",
+                    description=f"Subscription for server **{guild.name if guild else f'ID: {guild_id}'}** expires within 24 hours.",
+                    color=discord.Color.orange(),
+                    fields=[
+                        ("Server Name/ID", f"{guild.name if guild else 'N/A'} (`{guild_id}`)", False),
+                        ("Redeeming Admin ID", f"`{redeeming_admin_id}`", True),
+                        ("Expires On (UTC)", expiry_date.strftime("%Y-%m-%d %H:%M UTC"), True),
+                    ]
+                )
+                
+                # Set flag to prevent duplicate 1-day notifications
+                await update_guild_config(guild_id, "expiry_notified_1d", True)
+
+
+    @check_expirations.before_loop
+    async def before_check_expirations(self):
+        """Wait until the bot is connected before starting the loop."""
+        await self.bot.wait_until_ready()
 
     @commands.command(name="genpremiumcode")
     async def generate_code(self, ctx, prefix: str, duration: str = "30d"):
@@ -116,7 +256,6 @@ class PremiumRedeemer(commands.Cog):
 
         try:
             # 2. Run the synchronous DB operation with duration
-            # Returns the code and the parsed duration in days
             new_code, duration_days = await self.bot.loop.run_in_executor(None, generate_unique_code_sync, prefix, duration_days) 
             
             await ctx.send(f"✅ New premium code generated for prefix `{prefix}` with **{duration_days} days** duration: `{new_code}`. (Attempting to DM)")
@@ -149,21 +288,23 @@ class PremiumRedeemer(commands.Cog):
             # 1. Check if the guild already has an active subscription/configuration
             config = await get_guild_config(guild_id)
             if config.get("vip_role_id"):
-                await ctx.send(
-                    "🚫 **Redeem Failed:** This server already has an active Premium Role configured. "
-                    "Only one active subscription is allowed per server."
-                )
-                return
+                # Check if subscription is expired before failing redemption
+                if config.get("subscription_end_date") and config["subscription_end_date"] > datetime.utcnow():
+                    await ctx.send(
+                        "🚫 **Redeem Failed:** This server already has an active Premium Role configured. "
+                        "Only one active subscription is allowed per server."
+                    )
+                    return
 
             # 2. Check and atomically redeem the code
-            # Note: find_one_and_update is thread-safe for atomic operations
+            redeemed_time = datetime.utcnow()
             result = codes_collection.find_one_and_update(
                 {"code": code_upper, "redeemed": False},
                 {"$set": {
                     "redeemed": True,
                     "redeemed_by_user_id": user_id,
                     "redeemed_at_guild_id": guild_id,
-                    "redeemed_timestamp": datetime.utcnow()
+                    "redeemed_timestamp": redeemed_time
                 }},
                 return_document=True 
             )
@@ -172,15 +313,42 @@ class PremiumRedeemer(commands.Cog):
                 await ctx.send(f"❌ Code `{code}` is invalid or has already been redeemed.")
                 return
             
-            # Retrieve duration for confirmation message
-            duration_days = result.get("duration_days", "Unknown")
-
-            # 3. Code is valid and redeemed. Save the user ID who redeemed it.
-            await update_guild_config(guild_id, "redeeming_admin_id", user_id)
+            duration_days = result.get("duration_days", 0)
             
-            # 4. Respond and prompt admin to configure the role
+            # 3. Calculate Expiry and Store Initial Config 
+            expiry_date = redeemed_time + timedelta(days=duration_days)
+            
+            # Store subscription metadata in guild config
+            config_collection.update_one(
+                {"_id": guild_id},
+                {"$set": {
+                    "redeeming_admin_id": user_id,
+                    "subscription_end_date": expiry_date,
+                    # Reset flags for new subscription
+                    "expiry_notified_1d": False,
+                    "expiry_notified_final": False,
+                }},
+                upsert=True
+            )
+
+            # 4. Log the successful redemption 
+            await self.send_log_embed(
+                title="✅ PREMIUM CODE REDEEMED",
+                description="A unique code has been claimed, starting the configuration process for a server.",
+                color=discord.Color.green(),
+                fields=[
+                    ("Code", f"`{code_upper}` (Prefix: `{result.get('prefix', 'N/A')}`)", True),
+                    ("Duration", f"{duration_days} days", True),
+                    ("Expires On (UTC)", expiry_date.strftime("%Y-%m-%d %H:%M UTC"), True),
+                    ("Server Name", f"{ctx.guild.name} (`{guild_id}`)", False),
+                    ("Redeeming User", f"{ctx.author.mention} (`{user_id}`)", False),
+                ]
+            )
+            
+            # 5. Respond and prompt admin to configure the role
             await ctx.send(
                 f"✅ **Code Redeemed Successfully!** (Duration: {duration_days} days)\n\n"
+                f"Subscription expires on: **{expiry_date.strftime('%Y-%m-%d')} UTC**\n\n"
                 f"You have successfully claimed the subscription for this server! "
                 f"An Administrator must now run `{PREFIX}setpremiumrole <@Role>` "
                 f"to select the VIP role and finalize the configuration. "
@@ -207,10 +375,13 @@ class PremiumRedeemer(commands.Cog):
             # 2. Retrieve the ID of the user who ran the successful $redeem command
             config = await get_guild_config(guild_id)
             redeeming_user_id = config.get("redeeming_admin_id")
+            expiry_date = config.get("subscription_end_date")
             
             response = f"✅ **Premium Role Configuration Saved!**\n\n"
             response += f"**Server:** `{ctx.guild.name}`\n"
             response += f"**Premium Role Set:** {role.mention} (`{role.id}`)\n"
+            response += f"**Subscription End Date:** {expiry_date.strftime('%Y-%m-%d %H:%M UTC') if expiry_date else 'N/A'}\n"
+
 
             if not redeeming_user_id:
                 response += "\n\n**Note:** Could not find the original redeeming user ID. Please ensure someone ran `$redeem` previously."
@@ -222,16 +393,33 @@ class PremiumRedeemer(commands.Cog):
             response += f"**Redeeming Admin:** <@{redeeming_user_id}> (The user who ran `$redeem`)\n\n"
             
             # 3. Attempt to assign the role to the original redeeming user
+            role_assigned = False
             if redeeming_user:
                 try:
                     await redeeming_user.add_roles(role)
                     response += "**Action:** Premium role assigned to the redeeming admin."
+                    role_assigned = True
                 except discord.Forbidden:
                     response += "**Warning:** I lack permissions (`Manage Roles`) to assign the role. Check role hierarchy (my role must be higher than the role being assigned)."
                 except Exception as e:
                     response += f"**Error:** Failed to assign role to user: {e}"
             else:
                 response += "**Note:** The original redeeming admin is no longer in this server."
+
+            # 4. Log the role configuration completion
+            await self.send_log_embed(
+                title="⭐ SERVER PREMIUM CONFIGURATION COMPLETE",
+                description=f"The premium role has been set for the server and assigned to the Redeeming Admin.",
+                color=discord.Color.gold(),
+                fields=[
+                    ("Server Name", f"{ctx.guild.name} (`{guild_id}`)", False),
+                    ("Premium Role", f"{role.mention} (`{role.id}`)", True),
+                    ("Expires On (UTC)", expiry_date.strftime("%Y-%m-%d %H:%M UTC") if expiry_date else 'N/A', True),
+                    ("Redeeming Admin", f"<@{redeeming_user_id}> (`{redeeming_user_id}`)", True),
+                    ("Role Assigned?", "✅ Yes" if role_assigned else "❌ No (Permissions/User Error)", True),
+                    ("Configuring Admin", f"{ctx.author.mention}", False),
+                ]
+            )
 
             await ctx.send(response)
 
@@ -247,14 +435,6 @@ class PremiumRedeemer(commands.Cog):
             return
 
         # Permissions needed (Combined Integer: 268820352):
-        # - Manage Roles (268435456)
-        # - Manage Messages (8192)
-        # - Read Message History (65536)
-        # - Send Messages (2048)
-        # - Send Files/Attach Files (32768)
-        # - Send Embeds/Embed Links (16384)
-        # - Use External Emojis (262144)
-        # - Add Reactions (64) <- NEW
         PERMISSIONS_INT = 268820352 
 
         # Construct the OAuth2 URL
