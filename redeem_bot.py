@@ -25,8 +25,12 @@ PREFIX = "$"
 PORT = int(os.environ.get("PORT", 3000))
 
 # Dedicated channel ID for logging redemption, configuration, and expiry events
-# NOTE: Replace this with your actual log channel ID.
-LOG_CHANNEL_ID = 1445931744816660572
+# NOTE: Read from ENV for easy configuration. Ensure this is set correctly in Render.
+LOG_CHANNEL_ID = os.environ.get("LOG_CHANNEL_ID", 0) 
+try:
+    LOG_CHANNEL_ID = int(LOG_CHANNEL_ID)
+except ValueError:
+    LOG_CHANNEL_ID = 0 # Default to 0 if not set or invalid
 
 # --- Database Setup (Shared across all bot instances) ---
 try:
@@ -93,8 +97,8 @@ def generate_unique_code_sync(prefix: str, duration_days: int):
 class PremiumRedeemer(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Start the background task when the Cog is initialized
-        self.check_expirations.start() 
+        # NOTE: Removed task startup from __init__ to prevent "no running event loop" error.
+        # It is now started in on_ready.
 
     def cog_unload(self):
         """Ensure the background task is cancelled when the Cog is unloaded."""
@@ -136,9 +140,13 @@ class PremiumRedeemer(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """Confirms bot readiness."""
+        """Confirms bot readiness and starts the background task."""
         print(f"Bot instance logged in as {self.bot.user.name} (ID: {self.bot.user.id})")
         await self.bot.change_presence(activity=discord.Game(name=f"{PREFIX}redeem"))
+        
+        # FIX: Start the background task here, where the asyncio event loop is guaranteed to be running.
+        if not self.check_expirations.is_running():
+            self.check_expirations.start()
 
     @tasks.loop(hours=6) # Check every 6 hours
     async def check_expirations(self):
@@ -446,12 +454,7 @@ class PremiumRedeemer(commands.Cog):
 
         await ctx.send(
             f"🔗 **{self.bot.user.name}'s Invite Link**\n\n"
-            f"This link requests the following administrative and messaging permissions:\n"
-            f"• Manage Roles\n"
-            f"• Manage Messages\n"
-            f"• Read Message History\n"
-            f"• Send Messages, Embeds, Files, and External Emojis\n"
-            f"• **Add Reactions**\n\n"
+            f"This link requests the necessary permissions. "
             f"<{invite_url}>"
         )
         
@@ -476,6 +479,7 @@ def health_check():
 
 def run_flask():
     """Runs the Flask application in a separate thread."""
+    # Use the port defined in ENV or default to 3000
     app.run(host='0.0.0.0', port=PORT)
 
 def run_bot(token):
@@ -515,7 +519,6 @@ if __name__ == "__main__":
             bot_thread.start()
     
     # Keep the main thread alive indefinitely since the bot threads are running in the background.
-    # The Flask thread will satisfy the web service requirement of Render.
     while True:
         try:
             # Sleep briefly to reduce CPU usage
