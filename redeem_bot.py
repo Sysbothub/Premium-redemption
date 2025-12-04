@@ -3,12 +3,14 @@ import random
 import string
 import threading
 import time
+import sys
 from datetime import datetime, timedelta
 
 # Discord and MongoDB Libraries
 import discord
 from discord.ext import commands, tasks
 from pymongo import MongoClient
+from pymongo.errors import ConnectionError as MongoConnectionError
 
 # Web Server Library (for Render health check)
 from flask import Flask, jsonify
@@ -19,29 +21,40 @@ BOT_TOKENS_STR = os.environ.get("DISCORD_BOT_TOKENS", "YOUR_TOKEN_1,YOUR_TOKEN_2
 BOT_TOKENS = [token.strip() for token in BOT_TOKENS_STR.split(',') if token.strip()]
 
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017/")
-OWNER_ID = int(os.environ.get("OWNER_ID", 1234567890))
+OWNER_ID_STR = os.environ.get("OWNER_ID", "1234567890")
+try:
+    OWNER_ID = int(OWNER_ID_STR)
+except ValueError:
+    print(f"Warning: OWNER_ID environment variable ('{OWNER_ID_STR}') is not a valid integer. Using default 0.")
+    OWNER_ID = 0
+
 DB_NAME = "DiscordBotDB"
 PREFIX = "$"
 PORT = int(os.environ.get("PORT", 3000))
 
 # Dedicated channel ID for logging redemption, configuration, and expiry events
-# NOTE: Read from ENV for easy configuration. Ensure this is set correctly in Render.
-LOG_CHANNEL_ID = os.environ.get("LOG_CHANNEL_ID", 0) 
+LOG_CHANNEL_ID_STR = os.environ.get("LOG_CHANNEL_ID", "0")
 try:
-    LOG_CHANNEL_ID = int(LOG_CHANNEL_ID)
+    LOG_CHANNEL_ID = int(LOG_CHANNEL_ID_STR)
 except ValueError:
-    LOG_CHANNEL_ID = 0 # Default to 0 if not set or invalid
+    print(f"Warning: LOG_CHANNEL_ID environment variable ('{LOG_CHANNEL_ID_STR}') is not a valid integer. Using default 0.")
+    LOG_CHANNEL_ID = 0 
 
 # --- Database Setup (Shared across all bot instances) ---
 try:
+    # Attempt to connect and verify the connection
     client_mongo = MongoClient(MONGO_URI)
+    client_mongo.admin.command('ping') 
     db = client_mongo[DB_NAME]
     codes_collection = db["redemption_codes"]
     config_collection = db["guild_configs"]
     print("Successfully connected to MongoDB.")
+except MongoConnectionError as e:
+    print(f"Failed to connect to MongoDB (ConnectionError): {e}")
+    db = None
 except Exception as e:
-    print(f"Failed to connect to MongoDB: {e}")
-    db = None 
+    print(f"An unexpected error occurred during MongoDB connection: {e}")
+    db = None
 
 # --- Database Utility Functions (Shared) ---
 
@@ -49,16 +62,16 @@ async def get_guild_config(guild_id: int):
     """Retrieves guild configuration from the database."""
     if not db: return {}
     config = config_collection.find_one({"_id": guild_id})
-    # Ensure all required fields exist or are None/default
     if config:
         return config
+    # Default structure for a new guild
     return {
         "_id": guild_id, 
         "vip_role_id": None, 
         "redeeming_admin_id": None, 
         "subscription_end_date": None,
-        "expiry_notified_1d": False, # Flag for 1-day warning
-        "expiry_notified_final": False # Flag for final expiration
+        "expiry_notified_1d": False, 
+        "expiry_notified_final": False 
     }
 
 async def update_guild_config(guild_id: int, key: str, value):
@@ -97,12 +110,11 @@ def generate_unique_code_sync(prefix: str, duration_days: int):
 class PremiumRedeemer(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # NOTE: Removed task startup from __init__ to prevent "no running event loop" error.
-        # It is now started in on_ready.
 
     def cog_unload(self):
-        """Ensure the background task is cancelled when the Cog is unloaded."""
-        self.check_expirations.cancel()
+        # Ensure background task is cleanly stopped on cog unload/bot shutdown
+        if self.check_expirations.is_running():
+            self.check_expirations.cancel()
 
     async def send_log_embed(self, title: str, description: str, color: discord.Color, fields: list = None):
         """Helper function to send a structured log message to the dedicated channel."""
@@ -111,7 +123,6 @@ class PremiumRedeemer(commands.Cog):
             return
 
         try:
-            # Use get_channel (cached) and fall back to fetch_channel if not found
             log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
             if not log_channel:
                 log_channel = await self.bot.fetch_channel(LOG_CHANNEL_ID)
@@ -140,13 +151,47 @@ class PremiumRedeemer(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """Confirms bot readiness and starts the background task."""
+        """
+        Confirms bot readiness, starts the background task, 
+        and logs registered commands for debugging.
+        """
+        print("-" * 50)
         print(f"Bot instance logged in as {self.bot.user.name} (ID: {self.bot.user.id})")
+        
+        # --- DEBUG CHECK 1: Confirm command registration ---
+        registered_commands = [cmd.name for cmd in self.bot.commands]
+        print(f"DEBUG: Registered commands: {registered_commands}")
+        # --- END DEBUG CHECK 1 ---
+
         await self.bot.change_presence(activity=discord.Game(name=f"{PREFIX}redeem"))
         
-        # FIX: Start the background task here, where the asyncio event loop is guaranteed to be running.
         if not self.check_expirations.is_running():
             self.check_expirations.start()
+        print("-" * 50)
+
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        """
+        Listener to explicitly check if message content is visible and forward to 
+        the internal command processor.
+        """
+        # Ignore bot messages
+        if message.author.bot:
+            return
+
+        # Log raw message content for debugging prefix command issues
+        if message.content.startswith(f"{PREFIX}"):
+            print(f"DEBUG: RAW MESSAGE RECEIVED:")
+            print(f"  - Author: {message.author} (ID: {message.author.id})")
+            print(f"  - Guild: {message.guild.name if message.guild else 'DM'} (ID: {message.guild.id if message.guild else 'N/A'})")
+            print(f"  - Content: '{message.content}'") 
+            print(f"DEBUG: Finished raw message check.")
+            sys.stdout.flush() 
+        
+        # Process commands
+        await self.bot.process_commands(message)
+
 
     @tasks.loop(hours=6) # Check every 6 hours
     async def check_expirations(self):
@@ -157,10 +202,7 @@ class PremiumRedeemer(commands.Cog):
         utcnow = datetime.utcnow()
         one_day_ahead = utcnow + timedelta(days=1)
 
-        # Query for all configured guilds that have an expiration date set
-        subscriptions = config_collection.find({
-            "subscription_end_date": {"$ne": None},
-        })
+        subscriptions = config_collection.find({"subscription_end_date": {"$ne": None}})
 
         for sub in subscriptions:
             guild_id = sub["_id"]
@@ -180,7 +222,6 @@ class PremiumRedeemer(commands.Cog):
                     
                     if member and role:
                         try:
-                            # Attempt to remove the role
                             await member.remove_roles(role, reason="Premium Subscription Expired")
                             role_removed = "✅ Role Removed"
                         except discord.Forbidden:
@@ -192,7 +233,6 @@ class PremiumRedeemer(commands.Cog):
                     elif not role:
                         role_removed = "⚠️ VIP Role not found in guild"
 
-                # Send FINAL EXPIRATION Log
                 await self.send_log_embed(
                     title="🔴 SUBSCRIPTION EXPIRED",
                     description=f"Subscription for server **{guild.name if guild else f'ID: {guild_id}'}** has expired and role removal was attempted.",
@@ -206,14 +246,12 @@ class PremiumRedeemer(commands.Cog):
                     ]
                 )
                 
-                # Set flag to prevent future final notifications
                 await update_guild_config(guild_id, "expiry_notified_final", True)
 
 
             # 2. 1-DAY WARNING (Subscription expires within the next 24 hours)
             elif expiry_date < one_day_ahead and expiry_date >= utcnow and not sub.get("expiry_notified_1d"):
                 
-                # Send 1-DAY WARNING Log
                 await self.send_log_embed(
                     title="🟠 SUBSCRIPTION EXPIRING SOON (24H)",
                     description=f"Subscription for server **{guild.name if guild else f'ID: {guild_id}'}** expires within 24 hours.",
@@ -225,7 +263,6 @@ class PremiumRedeemer(commands.Cog):
                     ]
                 )
                 
-                # Set flag to prevent duplicate 1-day notifications
                 await update_guild_config(guild_id, "expiry_notified_1d", True)
 
 
@@ -264,6 +301,7 @@ class PremiumRedeemer(commands.Cog):
 
         try:
             # 2. Run the synchronous DB operation with duration
+            # Use run_in_executor to avoid blocking the Discord event loop
             new_code, duration_days = await self.bot.loop.run_in_executor(None, generate_unique_code_sync, prefix, duration_days) 
             
             await ctx.send(f"✅ New premium code generated for prefix `{prefix}` with **{duration_days} days** duration: `{new_code}`. (Attempting to DM)")
@@ -296,11 +334,11 @@ class PremiumRedeemer(commands.Cog):
             # 1. Check if the guild already has an active subscription/configuration
             config = await get_guild_config(guild_id)
             if config.get("vip_role_id"):
-                # Check if subscription is expired before failing redemption
                 if config.get("subscription_end_date") and config["subscription_end_date"] > datetime.utcnow():
                     await ctx.send(
                         "🚫 **Redeem Failed:** This server already has an active Premium Role configured. "
-                        "Only one active subscription is allowed per server."
+                        "Only one active subscription is allowed per server. If you are trying to extend, "
+                        "please wait for the current subscription to expire."
                     )
                     return
 
@@ -326,13 +364,11 @@ class PremiumRedeemer(commands.Cog):
             # 3. Calculate Expiry and Store Initial Config 
             expiry_date = redeemed_time + timedelta(days=duration_days)
             
-            # Store subscription metadata in guild config
             config_collection.update_one(
                 {"_id": guild_id},
                 {"$set": {
                     "redeeming_admin_id": user_id,
                     "subscription_end_date": expiry_date,
-                    # Reset flags for new subscription
                     "expiry_notified_1d": False,
                     "expiry_notified_final": False,
                 }},
@@ -377,10 +413,9 @@ class PremiumRedeemer(commands.Cog):
         try:
             guild_id = ctx.guild.id
             
-            # 1. Save the VIP role ID
+            # 1. Update the config with the new role ID
             await update_guild_config(guild_id, "vip_role_id", role.id)
             
-            # 2. Retrieve the ID of the user who ran the successful $redeem command
             config = await get_guild_config(guild_id)
             redeeming_user_id = config.get("redeeming_admin_id")
             expiry_date = config.get("subscription_end_date")
@@ -390,17 +425,14 @@ class PremiumRedeemer(commands.Cog):
             response += f"**Premium Role Set:** {role.mention} (`{role.id}`)\n"
             response += f"**Subscription End Date:** {expiry_date.strftime('%Y-%m-%d %H:%M UTC') if expiry_date else 'N/A'}\n"
 
-
             if not redeeming_user_id:
                 response += "\n\n**Note:** Could not find the original redeeming user ID. Please ensure someone ran `$redeem` previously."
                 await ctx.send(response)
                 return
 
-            # Note: fetch_member is asynchronous and required to ensure we get the latest member data
             redeeming_user = await ctx.guild.fetch_member(redeeming_user_id)
             response += f"**Redeeming Admin:** <@{redeeming_user_id}> (The user who ran `$redeem`)\n\n"
             
-            # 3. Attempt to assign the role to the original redeeming user
             role_assigned = False
             if redeeming_user:
                 try:
@@ -414,7 +446,6 @@ class PremiumRedeemer(commands.Cog):
             else:
                 response += "**Note:** The original redeeming admin is no longer in this server."
 
-            # 4. Log the role configuration completion
             await self.send_log_embed(
                 title="⭐ SERVER PREMIUM CONFIGURATION COMPLETE",
                 description=f"The premium role has been set for the server and assigned to the Redeeming Admin.",
@@ -442,11 +473,8 @@ class PremiumRedeemer(commands.Cog):
             await ctx.send("❌ Error: Bot user information is not yet available.")
             return
 
-        # Permissions needed (Combined Integer: 268820352):
-        # Read Messages, Send Messages, Manage Roles
+        # Permissions: Read Messages, Send Messages, Manage Roles (268435456 + 1024 + 16 = 268820352)
         PERMISSIONS_INT = 268820352 
-
-        # Construct the OAuth2 URL
         client_id = self.bot.user.id
         invite_url = (
             f"https://discord.com/oauth2/authorize?client_id={client_id}"
@@ -455,22 +483,19 @@ class PremiumRedeemer(commands.Cog):
 
         await ctx.send(
             f"🔗 **{self.bot.user.name}'s Invite Link**\n\n"
-            f"This link requests the necessary permissions. "
+            f"This link requests the necessary permissions (Manage Roles, etc.). "
             f"<{invite_url}>"
         )
-        
 
-# --- Flask Web Server (Required for Render) ---
-# Note: This is an internal health check and does not interact with the bots directly.
+
+# --- Flask Web Server (Required for Hosting) ---
 app = Flask(__name__)
-# Keep a list of all bot instances to check readiness
 active_bots = [] 
 
 @app.route("/")
 def health_check():
-    """Simple health check route for Render."""
+    """Endpoint for hosting providers (like Render) to check if the service is alive."""
     ready_bots = sum(1 for bot_instance in active_bots if bot_instance.is_ready())
-    
     return jsonify({
         "status": "running",
         "ready_bots": ready_bots,
@@ -479,50 +504,50 @@ def health_check():
     })
 
 def run_flask():
-    """Runs the Flask application in a separate thread."""
-    # Use the port defined in ENV or default to 3000
+    """Runs the Flask web server in a separate thread."""
     app.run(host='0.0.0.0', port=PORT)
 
 def run_bot(token):
     """Initializes and runs a single Discord bot instance."""
-    # Ensure all required intents are active for member/guild operations
     intents = discord.Intents.default()
-    intents.message_content = True
+    # CRITICAL: These intents must be enabled in the Discord Bot portal settings too.
+    intents.message_content = True 
     intents.members = True
     intents.guilds = True
     
     bot_instance = commands.Bot(command_prefix=PREFIX, intents=intents)
-    active_bots.append(bot_instance) # Track for health check
+    active_bots.append(bot_instance)
     
-    # Add the command and event logic (Cog) to the new bot instance
+    # Add the command cog
     bot_instance.add_cog(PremiumRedeemer(bot_instance))
     
     try:
         bot_instance.run(token)
     except Exception as e:
-        print(f"An error occurred while running a bot instance: {e}")
-        # Clean up the failed bot instance from the list
+        print(f"An error occurred while running a bot instance with token {token[:5]}...: {e}")
+        # Clean up failed bot from list
         if bot_instance in active_bots:
             active_bots.remove(bot_instance)
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    # 1. Start Flask web server in a background thread
+    # Start the Flask web server in a background thread
     threading.Thread(target=run_flask, daemon=True).start()
     
-    # 2. Start each Discord bot in its own background thread
     if not BOT_TOKENS:
         print("❌ Error: No bot tokens found in the DISCORD_BOT_TOKENS environment variable.")
+        sys.exit(1)
     else:
         print(f"Starting {len(BOT_TOKENS)} Discord bot instance(s)...")
+        # Start each bot instance in its own thread
         for token in BOT_TOKENS:
             bot_thread = threading.Thread(target=run_bot, args=(token,), daemon=True)
             bot_thread.start()
     
-    # Keep the main thread alive indefinitely since the bot threads are running in the background.
+    # Keep the main thread alive to prevent the daemon threads from exiting
+    # This is necessary for the background threads (Flask & Bots) to continue running
     while True:
         try:
-            # Sleep briefly to reduce CPU usage
             time.sleep(1) 
         except KeyboardInterrupt:
             print("Shutting down...")
