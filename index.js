@@ -81,7 +81,7 @@ function generateRandomCode() {
 }
 // BLOCK 4: EXPRESS WEB SERVER ENDPOINTS - HEALTH CHECK
 const express = require('express');
-const app = express();
+//const app = express();
 
 // Health check endpoint
 app.get('/', (req, res) => {
