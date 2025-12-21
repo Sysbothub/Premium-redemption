@@ -1,7 +1,7 @@
 // ========== COMPLETE BOT IN ONE FILE: index.js ==========
 // BLOCK 1: IMPORTS AND INITIAL SETUP
 const { Client, GatewayIntentBits, Collection, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
-const express = require('express');
+//const express = require('express');
 const bodyParser = require('body-parser');
 const { AutoPoster } = require('topgg-autoposter');
 //const mongoose = require('mongoose');
