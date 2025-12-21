@@ -122,9 +122,9 @@ client.on('messageCreate', async (message) => {
     if (commandName === 'help') {
       const helpEmbed = new EmbedBuilder()
         .setColor('#0099ff')
-        .setTitle('📖 Bot Commands')
+        .setTitle('📖 Miradion Premium Redemption commands')
         .addFields(
-          { name: '🗳️ Vote Commands', value: '`!vote` - Get voting link\n`!topvoters` - See top voters\n`!voterinfo <userId>` - Check user votes', inline: false },
+          { name: '🗳️ Vote Commands', value: '`!vote` - Get voting link`, inline: false },
           { name: '💳 Premium Commands', value: '`!redeem <code>` - Redeem premium code\n`!premium` - Check premium status', inline: false },
           { name: '⚙️ Utility Commands', value: '`!ping` - Bot latency\n`!support` - Support server link', inline: false }
         )
@@ -190,7 +190,7 @@ client.on('messageCreate', async (message) => {
             { name: '💳 How to Get Premium?', value: `Use \`${PREFIX}redeem <code>\` to activate premium`, inline: false },
             { name: '🗳️ Purchase Premium', value: `Head to our Webstore [Premium Shop](https://miraidon.sell.app) to get codes!`, inline: false }
           )
-          .setFooter({ text: 'Premium Redemption Bot' })
+          .setFooter({ text: 'Miraidon Premium Redemption Bot' })
           .setTimestamp();
 
         return message.reply({ embeds: [premiumEmbed], allowedMentions: { repliedUser: false } });
