@@ -139,11 +139,12 @@ client.on('messageCreate', async (message) => {
       const voteEmbed = new EmbedBuilder()
         .setColor('#FFD700')
         .setTitle('🗳️ Vote for Our Bot!')
-        .setDescription('Vote on Top.gg to support us and get rewards!')
+        .setDescription('Vote on Top.gg to support us and get rewarded')
         .addFields(
           { name: '🔗 Vote Link', value: `https://top.gg/bot/${client.user.id}/vote`, inline: false },
           { name: '⏰ Vote Every 12 Hours', value: 'Come back after 12 hours to vote again!', inline: false },
-          { name: '🎁 Rewards', value: 'Get entered into a bimonthly draw for a $25 Amazon Giftcard!', inline: false }
+          { name: '🎁 Rewards', value: 'Get entered into a bimonthly draw for a $25 Amazon Giftcard!', inline: false },
+          { name: ':bar_chart: Vote Leaderboard', value: 'View the Leaderboard at: https://vote.miraidon.ca', inline: false }
         )
         .setFooter({ text: 'Miraidon Trade Bot' })
         .setTimestamp();
