@@ -259,7 +259,7 @@ app.listen(PORT, () => {
 });
 // BLOCK 10: TOP.GG SETUP
 //const { AutoPoster } = require('topgg-autoposter');
-const { client } = require('./index.js');
+//const { client } = require('./index.js');
 
 if (process.env.TOPGG_API_TOKEN) {
   const ap = new AutoPoster({
