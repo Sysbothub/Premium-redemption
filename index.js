@@ -124,7 +124,7 @@ client.on('messageCreate', async (message) => {
         .setColor('#0099ff')
         .setTitle('📖 Miradion Premium Redemption commands')
         .addFields(
-          { name: '🗳️ Vote Commands', value: '`!vote` - Get voting link`, inline: false },
+          { name: '🗳️ Vote Commands', value: '`!vote` - Get voting link', inline: false },
           { name: '💳 Premium Commands', value: '`!redeem <code>` - Redeem premium code\n`!premium` - Check premium status', inline: false },
           { name: '⚙️ Utility Commands', value: '`!ping` - Bot latency\n`!support` - Support server link', inline: false }
         )
