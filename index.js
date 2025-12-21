@@ -214,55 +214,119 @@ client.on('messageCreate', async (message) => {
       return message.reply({ embeds: [premiumEmbed], allowedMentions: { repliedUser: false } });
     }
 
-    // BLOCK 14: CREATE CODE COMMAND
-    if (commandName === 'createcode') {
-      if (message.author.id !== process.env.ADMIN_USER_ID) {
-        return message.reply({
-          content: '❌ Only admins can create codes.',
-          allowedMentions: { repliedUser: false }
+    // BLOCK 14: CREATE CODE COMMAND (ADMIN ONLY) - IMPROVED
+if (commandName === 'createcode') {
+  if (message.author.id !== process.env.ADMIN_USER_ID) {
+    return message.reply({
+      content: '❌ Only admins can create codes.',
+      allowedMentions: { repliedUser: false }
+    });
+  }
+
+  // Parse arguments: !createcode [quantity] [premiumDays] [prefix]
+  const quantity = parseInt(args[0]) || 1;
+  const premiumDays = parseInt(args[1]) || 31;
+  const codePrefix = args[2]?.toUpperCase() || 'PREM';
+
+  // Validate quantity
+  if (isNaN(quantity) || quantity < 1 || quantity > 100) {
+    return message.reply({
+      content: '❌ Quantity must be between 1 and 100. Usage: `!createcode [qty] [days] [prefix]`',
+      allowedMentions: { repliedUser: false }
+    });
+  }
+
+  // Validate days
+  if (premiumDays < 1 || premiumDays > 3650) {
+    return message.reply({
+      content: '❌ Premium days must be between 1 and 3650.',
+      allowedMentions: { repliedUser: false }
+    });
+  }
+
+  try {
+    const generatedCodes = [];
+    const failedCodes = [];
+
+    // Generate codes
+    for (let i = 1; i <= quantity; i++) {
+      // Create unique random code
+      const randomPart = Math.random().toString(36).substring(2, 12).toUpperCase();
+      const timestamp = Date.now().toString(36).toUpperCase().slice(-4);
+      const codeString = `${codePrefix}-${timestamp}-${randomPart}`;
+
+      try {
+        const newCode = new Code({
+          code: codeString,
+          premiumDays,
+          maxUses: 1,
+          createdBy: message.author.id
         });
+
+        await newCode.save();
+        generatedCodes.push(codeString);
+        console.log(`✅ Code created: ${codeString}`);
+      } catch (error) {
+        failedCodes.push(codeString);
+        console.error(`❌ Failed to create code: ${codeString}`, error.message);
       }
+    }
 
-      if (!args[0]) {
-        return message.reply({
-          content: `❌ Usage: ${PREFIX}createcode <code>`,
-          allowedMentions: { repliedUser: false }
-        });
-      }
+    // Create result embed for Discord
+    const successCount = generatedCodes.length;
+    const failCount = failedCodes.length;
 
-      const newCode = args[0].toUpperCase();
-      const premiumDays = parseInt(args[1]) || 31;
+    const codeEmbed = new EmbedBuilder()
+      .setColor(successCount > 0 ? '#00FF00' : '#FF0000')
+      .setTitle(successCount > 0 ? '✅ Codes Generated' : '❌ Code Generation Failed')
+      .addFields(
+        { name: '📊 Created', value: successCount.toString(), inline: true },
+        { name: '❌ Failed', value: failCount.toString(), inline: true },
+        { name: '⏳ Duration', value: `${premiumDays} days`, inline: true },
+        { name: '🎯 Prefix', value: codePrefix, inline: true },
+        { name: '📋 Preview (First 5)', value: generatedCodes.slice(0, 5).join('\n') || 'None', inline: false }
+      )
+      .setFooter({ text: 'Premium Redemption Bot' })
+      .setTimestamp();
 
-      const existingCode = await Code.findOne({ code: newCode });
-      if (existingCode) {
-        return message.reply({
-          content: '❌ Code already exists.',
-          allowedMentions: { repliedUser: false }
-        });
-      }
+    await message.reply({ embeds: [codeEmbed], allowedMentions: { repliedUser: false } });
 
-      const code = new Code({
-        code: newCode,
-        premiumDays,
-        maxUses: 1,
-        createdBy: message.author.id
-      });
-
-      await code.save();
-
-      const codeEmbed = new EmbedBuilder()
+    // Send full code list via DM
+    if (generatedCodes.length > 0) {
+      const codeList = generatedCodes.join('\n');
+      
+      const dmEmbed = new EmbedBuilder()
         .setColor('#00FF00')
-        .setTitle('✅ Code Created')
+        .setTitle('🎫 Generated Premium Codes')
         .addFields(
-          { name: '🎫 Code', value: newCode, inline: true },
-          { name: '⏳ Duration', value: `${premiumDays} days`, inline: true },
-          { name: '👤 Created By', value: message.author.tag, inline: false }
+          { name: '📊 Total Codes', value: successCount.toString(), inline: true },
+          { name: '⏳ Duration Each', value: `${premiumDays} days`, inline: true },
+          { name: '🎯 Prefix Used', value: codePrefix, inline: true },
+          { name: '📋 All Codes', value: `\`\`\`\n${codeList}\n\`\`\``, inline: false }
         )
-        .setFooter({ text: 'Premium Redemption Bot' })
+        .setFooter({ text: 'Premium Redemption Bot - Copy these codes for distribution' })
         .setTimestamp();
 
-      return message.reply({ embeds: [codeEmbed], allowedMentions: { repliedUser: false } });
+      try {
+        await message.author.send({ embeds: [dmEmbed] });
+        console.log(`✅ DM sent to ${message.author.tag} with ${successCount} codes`);
+      } catch (error) {
+        console.log(`⚠️ Could not DM codes to user: ${error.message}`);
+        return message.reply({
+          content: '⚠️ Codes created but DM failed. Check your DM settings.',
+          allowedMentions: { repliedUser: false }
+        });
+      }
     }
+
+  } catch (error) {
+    console.error('❌ Code generation error:', error);
+    return message.reply({
+      content: '❌ An error occurred while generating codes.',
+      allowedMentions: { repliedUser: false }
+    });
+  }
+}
 
     // BLOCK 15: REDEEM COMMAND
     if (commandName === 'redeem') {
