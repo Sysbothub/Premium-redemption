@@ -4,7 +4,7 @@ const { Client, GatewayIntentBits, Collection, EmbedBuilder, ActionRowBuilder, B
 const express = require('express');
 const bodyParser = require('body-parser');
 const { AutoPoster } = require('topgg-autoposter');
-const mongoose = require('mongoose');
+//const mongoose = require('mongoose');
 require('dotenv').config();
 
 // ========== EXPRESS WEB SERVER SETUP ==========
