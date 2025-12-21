@@ -1,0 +1,32 @@
+{
+  "name": "Premium-redemption",
+  "version": "1.0.0",
+  "description": "Discord Premium Redemption Bot with Top.gg Integration",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "premium",
+    "topgg"
+  ],
+  "author": "Joseph Dykens",
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^14.14.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "body-parser": "^1.20.2",
+    "mongoose": "^8.0.0",
+    "topgg-autoposter": "^2.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
