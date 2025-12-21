@@ -258,7 +258,7 @@ app.listen(PORT, () => {
   console.log(`📊 Status page: http://localhost:${PORT}`);
 });
 // BLOCK 10: TOP.GG SETUP
-const { AutoPoster } = require('topgg-autoposter');
+//const { AutoPoster } = require('topgg-autoposter');
 const { client } = require('./index.js');
 
 if (process.env.TOPGG_API_TOKEN) {
